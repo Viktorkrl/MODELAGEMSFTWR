@@ -1,0 +1,80 @@
+stateDiagram-v2
+    %% =========================================================================
+    %% DIAGRAMA DE TRANSIÇÃO DE ESTADOS (STATE MACHINE) - APS 3
+    %% Entidade Central de Domínio: Negociacao
+    %% Aluno: Vitor Silva | Curso: Engenharia de Software - UniSenai
+    %% =========================================================================
+
+    [*] --> Aberta : manifestarInteresse [ofertaAtiva == true] / instanciarNegociacao()
+
+    Aberta --> EmNegociacao : submeterProposta [saldoDisponivel >= qtd && valorUnitario > 0] / registrarPropostaInicial()
+    Aberta --> Cancelada : desistirAbertura [semProposta == true] / registrarDesistencia()
+
+    %% -------------------------------------------------------------------------
+    %% ESTADO COMPOSTO (SUBESTADOS) E AÇÕES INTERNAS (entry / do / exit)
+    %% -------------------------------------------------------------------------
+    state EmNegociacao {
+        [*] --> AguardandoAnaliseVendedora
+        
+        AguardandoAnaliseVendedora --> ContrapropostaVendedora : contrapropor [rodada < 3 && novoValor > 0] / registrarHistoricoContraproposta()
+        ContrapropostaVendedora --> AguardandoAnaliseCompradora : notificarContraparte()
+        
+        AguardandoAnaliseCompradora --> ContrapropostaCompradora : contrapropor [rodada < 3 && novoValor > 0] / registrarHistoricoContraproposta()
+        ContrapropostaCompradora --> AguardandoAnaliseVendedora : notificarContraparte()
+        
+        %% Subfluxo de Homologação de Amostra Técnica (UC09)
+        AguardandoAnaliseVendedora --> AguardandoHomologacaoAmostra : solicitarAmostraTecnica [isResiduoClasseI == true && laudoExigeEnsaio == true] / emitirGuiaRemessaAmostra()
+        AguardandoHomologacaoAmostra --> AguardandoAnaliseVendedora : aprovarLaudoAmostra [amostraConforme == true] / registrarHomologacaoBancada()
+        AguardandoHomologacaoAmostra --> Cancelada : reprovarLaudoAmostra [amostraNaoConforme == true] / emitirParecerIncompatibilidade()
+
+        %% Consenso de Cláusulas
+        AguardandoAnaliseVendedora --> TermosConsensados : aceitarTermos [consensoPrecoVolume == true] / emitirMinutaTermoAcordo()
+        AguardandoAnaliseCompradora --> TermosConsensados : aceitarTermos [consensoPrecoVolume == true] / emitirMinutaTermoAcordo()
+        
+        TermosConsensados --> ProntoParaLiquidacao : confirmarAceiteMutuo [ambasPartesAssinaram == true && saldoEstoqueSuficiente == true] / congelarEstoqueEGarantirSLA()
+        
+        note right of AguardandoHomologacaoAmostra
+            «extend» UC09: Amostra Técnica
+            Exigida para resíduos perigosos
+            (NBR 10004 Classe I)
+        end note
+    }
+
+    %% Compartimentos de Ações Internas (entry, do, exit) no estado EmNegociacao
+    EmNegociacao : entry / registrarAuditoriaAbertura()
+    EmNegociacao : do / monitorarSlaExpiracao48h()
+    EmNegociacao : exit / desarmarTimerSla()
+
+    %% Transições de Saída por Exceção / SLA
+    EmNegociacao --> Cancelada : cancelarNegociacao [motivoInformado == true] / liberarLocksConcorrentes()
+    EmNegociacao --> Expirada : timeOutSla [tempoDecorrido > 48h] / notificarPartesExpiracao()
+    EmNegociacao --> InterrompidaPorTerceiro : loteEsgotadoPorTerceiro [saldoRemanescente == 0] / abortarNegociacaoConcorrente()
+
+    %% -------------------------------------------------------------------------
+    %% ESTADO: PRONTO PARA LIQUIDAÇÃO (PONTO DE FECHAMENTO DO CASO DE USO)
+    %% -------------------------------------------------------------------------
+    state ProntoParaLiquidacao {
+        [*] --> AguardandoInicioEscrow
+        AguardandoInicioEscrow --> HabilitadaParaTransacao : gerarPayloadTransacao()
+    }
+
+    ProntoParaLiquidacao : entry / persistirHashContratualSHA256()
+    ProntoParaLiquidacao : do / exporEndpointLiquidacaoUC10()
+    ProntoParaLiquidacao : exit / instanciarTransacaoB2B()
+
+    note right of ProntoParaLiquidacao
+        Meta da Funcionalidade:
+        Termo de Acordo assinado,
+        lote de sobra reservado e
+        habilitado para UC10 (Escrow e MTR)
+    end note
+
+    %% -------------------------------------------------------------------------
+    %% TRANSIÇÃO PARA ESTADOS FINAIS
+    %% -------------------------------------------------------------------------
+    ProntoParaLiquidacao --> ConcluidaParaTransacao : transicionarParaUC10 [iniciarCustodiaEscrow == true] / instanciarTransacao()
+
+    ConcluidaParaTransacao --> [*]
+    Cancelada --> [*]
+    Expirada --> [*]
+    InterrompidaPorTerceiro --> [*]

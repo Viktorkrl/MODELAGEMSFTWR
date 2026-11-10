@@ -1,0 +1,205 @@
+sequenceDiagram
+    autonumber
+    %% =========================================================================
+    %% DIAGRAMA DE SEQUÊNCIA UML - APS 3
+    %% Funcionalidade: Negociação B2B (UC07, UC08, UC09) -> Termo de Acordo
+    %% Aluno: Vitor Silva | Curso: Engenharia de Software - UniSenai
+    %% =========================================================================
+
+    actor Compradora as Indústria Compradora (Destinadora)
+    actor Vendedora as Indústria Vendedora (Geradora)
+    participant Controller as NegociacaoController
+    participant Service as NegociacaoService
+    participant Negociacao as Negociacao (Domain Entity)
+    participant Oferta as Oferta (Domain Entity)
+    participant TermoService as TermoAcordoService
+    participant Repo as NegociacaoRepository
+    participant Broker as RabbitMQ (Exchange: residuos.topic)
+    participant Notifier as NotificacaoService
+
+    %% -------------------------------------------------------------------------
+    %% 1. FASE DE ABERTURA: MANIFESTAÇÃO DE INTERESSE E PROPOSTA INICIAL (UC07 / UC08)
+    %% -------------------------------------------------------------------------
+    rect rgb(240, 248, 255)
+        Note over Compradora, Controller: Fase 1: Envio da Proposta Inicial de Aquisição/Permuta (UC07)
+        Compradora->>Controller: POST /api/v1/negociacoes (PropostaRequestDTO)
+        activate Controller
+        Controller->>Service: processarAberturaProposta(propostaDTO)
+        activate Service
+        
+        Service->>Oferta: validarDisponibilidade(quantidadePretendida)
+        activate Oferta
+        Oferta-->>Service: estoqueDisponivel: Boolean (true)
+        deactivate Oferta
+        
+        Service->>Negociacao: new Negociacao(oferta, compradora, vendedora, valorSugerido, qtd)
+        activate Negociacao
+        Negociacao-->>Service: instanciaNegociacao [Status: EM_ABERTO]
+        deactivate Negociacao
+        
+        Service->>Repo: save(instanciaNegociacao)
+        activate Repo
+        Repo-->>Service: Negociacao persistida (id: 1042)
+        deactivate Repo
+        
+        %% Chamada Assíncrona via Mensageria
+        Service-)Broker: [Mensageria -\>] publish("negociacao.criada", EventoNegociacaoCriadaDTO)
+        activate Broker
+        Broker-)Notifier: [Mensageria -\>] consumirEvento(EventoNegociacaoCriadaDTO)
+        deactivate Broker
+        activate Notifier
+        Notifier-)Vendedora: [Notificação Push/Email -\>] alertarNovaProposta(NotificacaoDTO)
+        deactivate Notifier
+        
+        Service-->>Controller: PropostaResponseDTO(id: 1042, status: EM_ABERTO, valor, qtd)
+        deactivate Service
+        Controller-->>Compradora: 201 Created (PropostaResponseDTO)
+        deactivate Controller
+    end
+
+    %% -------------------------------------------------------------------------
+    %% 2. FASE DE ITERAÇÃO: CONTRAPROPOSTAS E AJUSTES DE TERMOS (UC08)
+    %% -------------------------------------------------------------------------
+    rect rgb(255, 250, 240)
+        Note over Vendedora, Compradora: Fase 2: Rodadas Iterativas de Contrapropostas
+        loop Rodada de Contrapropostas [enquanto sem consenso e rodadas <= 3]
+            Vendedora->>Controller: POST /api/v1/negociacoes/1042/contraproposta (ContrapropostaDTO)
+            activate Controller
+            Controller->>Service: submeterContraproposta(1042, contrapropostaDTO)
+            activate Service
+            
+            Service->>Repo: findById(1042)
+            activate Repo
+            Repo-->>Service: Negociacao
+            deactivate Repo
+            
+            Service->>Negociacao: contrapropor(novoValor, novaQuantidade)
+            activate Negociacao
+            Negociacao-->>Service: void [Status: CONTRAPROPOSTA_VENDEDORA]
+            deactivate Negociacao
+            
+            Service->>Repo: save(negociacao)
+            activate Repo
+            Repo-->>Service: Negociacao atualizada
+            deactivate Repo
+            
+            Service-)Broker: [Mensageria -\>] publish("negociacao.contraproposta", EventoContrapropostaDTO)
+            activate Broker
+            Broker-)Notifier: [Mensageria -\>] consumirEvento(EventoContrapropostaDTO)
+            deactivate Broker
+            activate Notifier
+            Notifier-)Compradora: [Notificação Push/Email -\>] alertarContraproposta(NotificacaoDTO)
+            deactivate Notifier
+            
+            Service-->>Controller: ContrapropostaResponseDTO(id: 1042, status, novoValor, novaQtd)
+            deactivate Service
+            Controller-->>Vendedora: 200 OK (ContrapropostaResponseDTO)
+            deactivate Controller
+        end
+    end
+
+    %% -------------------------------------------------------------------------
+    %% 3. FRAGMENTOS COMBINADOS: AMOSTRA TÉCNICA OU FECHAMENTO OU REJEIÇÃO
+    %% -------------------------------------------------------------------------
+    rect rgb(245, 255, 250)
+        Note over Compradora, Vendedora: Fase 3: Decisão, Amostra Técnica («extend» UC09) ou Fechamento
+        alt Fluxo de Extensão UC09: Solicitar Amostra Técnica para Validação Laboratorial
+            Compradora->>Controller: POST /api/v1/negociacoes/1042/amostra (SolicitacaoAmostraDTO)
+            activate Controller
+            Controller->>Service: solicitarAmostraTecnica(1042, solicitacaoDTO)
+            activate Service
+            
+            Service->>Negociacao: solicitarAmostra(justificativa, enderecoEntrega)
+            activate Negociacao
+            Negociacao-->>Service: void [Status: AGUARDANDO_AMOSTRA]
+            deactivate Negociacao
+            
+            Service->>Repo: save(negociacao)
+            activate Repo
+            Repo-->>Service: Negociacao
+            deactivate Repo
+            
+            Service-)Broker: [Mensageria -\>] publish("amostra.solicitada", EventoAmostraDTO)
+            Service-->>Controller: AmostraResponseDTO(id: 1042, status: AGUARDANDO_AMOSTRA)
+            deactivate Service
+            Controller-->>Compradora: 200 OK (AmostraResponseDTO)
+            deactivate Controller
+            
+            Note over Compradora, Vendedora: Vendedora envia amostra física homologada em laboratório; negociação é retomada
+            
+        else Fluxo Principal: Aceite Mútuo de Termos e Conclusão do Acordo
+            Compradora->>Controller: PUT /api/v1/negociacoes/1042/aceite-termos
+            activate Controller
+            Controller->>Service: confirmarAceiteTermos(1042, compradoraId)
+            activate Service
+            
+            Service->>Negociacao: aceitarTermos()
+            activate Negociacao
+            Negociacao-->>Service: termosAceitos: Boolean (true)
+            deactivate Negociacao
+            
+            Vendedora->>Controller: PUT /api/v1/negociacoes/1042/aceite-termos
+            Controller->>Service: confirmarAceiteTermos(1042, vendedoraId)
+            Service->>Negociacao: aceitarTermos()
+            activate Negociacao
+            Negociacao-->>Service: termosAceitos: Boolean (true - ambas partes confirmadas)
+            deactivate Negociacao
+            
+            alt [ambasPartesAssinaram == true && saldoEstoqueSuficiente == true]
+                %% Operação crítica de reserva atômica de sobras industriais
+                Service->>Oferta: reservarQuantidade(quantidadeFinal)
+                activate Oferta
+                Oferta-->>Service: void [quantidadeDisponivel deduzida / reservada]
+                deactivate Oferta
+                
+                %% Geração do Termo de Acordo Formal
+                Service->>TermoService: gerarMinutaTermoAcordo(negociacao)
+                activate TermoService
+                TermoService-->>Service: TermoAcordoDTO(hashSHA256, urlMinutaAssinada)
+                deactivate TermoService
+                
+                Service->>Negociacao: congelarReservaEstoque()
+                activate Negociacao
+                Negociacao-->>Service: void [Status: PRONTO_PARA_LIQUIDACAO]
+                deactivate Negociacao
+                
+                Service->>Repo: save(negociacao)
+                activate Repo
+                Repo-->>Service: Negociacao persistida
+                deactivate Repo
+                
+                %% Disparo Assíncrono para Integrações Subsequentes (Escrow e MTR Digital)
+                Service-)Broker: [Mensageria -\>] publish("negociacao.pronto_liquidacao", EventoProntoLiquidacaoDTO)
+                activate Broker
+                Broker-)Notifier: [Mensageria -\>] alertarPartesProntoLiquidacao(EventoProntoLiquidacaoDTO)
+                deactivate Broker
+                
+                Service-->>Controller: TermoAcordoResponseDTO(id: 1042, status: PRONTO_PARA_LIQUIDACAO, hashSHA256)
+                deactivate Service
+                Controller-->>Compradora: 200 OK (TermoAcordoResponseDTO)
+                deactivate Controller
+            end
+            
+        else Fluxo de Exceção: Rejeição de Termos ou Desistência Formal
+            Vendedora->>Controller: DELETE /api/v1/negociacoes/1042 (CancelamentoRequestDTO)
+            activate Controller
+            Controller->>Service: cancelarNegociacao(1042, motivo)
+            activate Service
+            
+            Service->>Negociacao: cancelar(motivo)
+            activate Negociacao
+            Negociacao-->>Service: void [Status: CANCELADA]
+            deactivate Negociacao
+            
+            Service->>Repo: save(negociacao)
+            activate Repo
+            Repo-->>Service: Negociacao
+            deactivate Repo
+            
+            Service-)Broker: [Mensageria -\>] publish("negociacao.cancelada", EventoCancelamentoDTO)
+            Service-->>Controller: NegociacaoStatusDTO(id: 1042, status: CANCELADA, motivo)
+            deactivate Service
+            Controller-->>Vendedora: 200 OK (NegociacaoStatusDTO)
+            deactivate Controller
+        end
+    end

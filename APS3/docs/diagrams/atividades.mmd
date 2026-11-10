@@ -1,0 +1,138 @@
+flowchart TD
+    %% =========================================================================
+    %% DIAGRAMA DE ATIVIDADES UML COM RAIAS (SWIMLANES) - APS 3
+    %% Processo de Negociação B2B, Amostra Técnica e Fechamento de Termo de Acordo
+    %% Aluno: Vitor Silva | Engenharia de Software - UniSenai
+    %% =========================================================================
+
+    %% -------------------------------------------------------------------------
+    %% DEFINIÇÃO DAS 4 RAIAS DE PARTIÇÃO (SWIMLANES)
+    %% -------------------------------------------------------------------------
+    
+    subgraph Compradora ["Raia 1: Indústria Compradora (Destinadora)"]
+        node_start((● Início))
+        act_manifestar["UC07: Selecionar Anúncio de Sobra e Manifestar Interesse"]
+        act_proposta["Elaborar Proposta Inicial<br/>(Quantidade Pretendida, Preço e Frete CIF/FOB)"]
+        act_decidir_amostra{"Solicitar Ensaio<br/>Laboratorial?"}
+        act_solicitar_amostra["UC09: Solicitar Amostra Técnica<br/>(Justificativa e Endereço de Teste)"]
+        act_testar_amostra["Realizar Ensaios e Testes Físico-Químicos<br/>em Bancada de Laboratório"]
+        act_avaliar_contra_compradora{"Avaliar Contraproposta<br/>da Vendedora"}
+        act_aceitar_compradora["Emitir Aceite Eletrônico dos Termos<br/>(Assinatura Digital Compradora)"]
+        act_rejeitar_compradora["Formalizar Rejeição e Desistência"]
+    end
+
+    subgraph Engine ["Raia 2: Marketplace Engine (Back-End Core & Services)"]
+        act_validar_estoque{"Validar Saldo<br/>da Oferta"}
+        act_criar_negociacao["Criar Instância de Negociacao<br/>[Status: EM_ABERTO]"]
+        act_rejeitar_proposta_sem_saldo["Retornar Erro de Validação<br/>(Saldo Insuficiente de Lote)"]
+        act_atualizar_contraproposta["Registrar Contraproposta e<br/>Incrementar Contador de Rodadas"]
+        
+        %% BARRA DE FORK (DIVISÃO CONCORRENTE)
+        fork_fechamento["==================== BARRA DE FORK (DIVISÃO PARALELA) ===================="]
+        
+        act_reserva_lote["Oferta.reservarQuantidade(qtdFinal)<br/>[Bloqueio Transacional de Saldo no Catálogo]"]
+        act_gerar_termo["TermoAcordoService.gerarTermoAcordo()<br/>[Geração de Hash SHA-256 e Minuta Jurídica PDF]"]
+        act_disparar_evento["Publicar Evento de Domínio<br/>'negociacao.acordo.firmado' no RabbitMQ"]
+        
+        %% BARRA DE JOIN (SINCRONIZAÇÃO)
+        join_fechamento["==================== BARRA DE JOIN (SINCRONIZAÇÃO) ===================="]
+        
+        act_transicao_pronto["Negociacao.congelarReservaEstoque()<br/>[Status: PRONTO_PARA_LIQUIDACAO]"]
+        act_encerrar_cancelada["Atualizar Negociacao<br/>[Status: CANCELADA] e Liberar Locks"]
+        node_fim_pronto((◉ Pronto para Liquidação))
+        node_fim_cancelada((◉ Cancelada))
+    end
+
+    subgraph Vendedora ["Raia 3: Indústria Vendedora (Geradora)"]
+        act_analisar_proposta{"Decisão da Vendedora<br/>sobre Proposta"}
+        act_contrapropor_vendedora["Submeter Contraproposta Estruturada<br/>(Novo Preço Unitário e Ajuste de Lote)"]
+        act_rejeitar_vendedora["Rejeitar Proposta com Motivo Formal"]
+        act_despachar_amostra["Despachar Amostra Física com Guia<br/>e Informar Código de Rastreio"]
+        act_aceitar_vendedora["Emitir Aceite Eletrônico dos Termos<br/>(Assinatura Digital Vendedora)"]
+    end
+
+    subgraph Notificacoes ["Raia 4: Mensageria & Notificações (RabbitMQ / Push)"]
+        act_notif_abertura["Consumir 'negociacao.criada'<br/>-> Notificar Vendedora via Push/Email"]
+        act_notif_contra["Consumir 'negociacao.contraproposta'<br/>-> Notificar Contraparte"]
+        act_notif_amostra["Consumir 'amostra.solicitada'<br/>-> Alertar Expedição da Vendedora"]
+        act_notif_fechamento["Consumir 'negociacao.acordo.firmado'<br/>-> Notificar Ambas as Indústrias"]
+        act_notif_cancelamento["Consumir 'negociacao.cancelada'<br/>-> Alertar Encerramento"]
+    end
+
+    %% -------------------------------------------------------------------------
+    %% FLUXO DO PROCESSO COM CONDIÇÕES DE GUARDA FORMAL
+    %% -------------------------------------------------------------------------
+
+    node_start --> act_manifestar
+    act_manifestar --> act_proposta
+    act_proposta --> act_validar_estoque
+
+    %% Decisão de Estoque
+    act_validar_estoque --> |"[saldoDisponivel >= quantidadePretendida]"| act_criar_negociacao
+    act_validar_estoque --> |"[saldoDisponivel < quantidadePretendida]"| act_rejeitar_proposta_sem_saldo
+    act_rejeitar_proposta_sem_saldo --> node_fim_cancelada
+
+    %% Notificação de Abertura
+    act_criar_negociacao --> act_notif_abertura
+    act_notif_abertura --> act_analisar_proposta
+
+    %% Decisão da Vendedora
+    act_analisar_proposta --> |"[decisao == REJEITAR]"| act_rejeitar_vendedora
+    act_rejeitar_vendedora --> act_encerrar_cancelada
+    
+    act_analisar_proposta --> |"[decisao == CONTRAPROPOR]"| act_contrapropor_vendedora
+    act_contrapropor_vendedora --> act_atualizar_contraproposta
+    act_atualizar_contraproposta --> act_notif_contra
+    act_notif_contra --> act_avaliar_contra_compradora
+
+    act_avaliar_contra_compradora --> |"[aceitaContraproposta == false]"| act_rejeitar_compradora
+    act_rejeitar_compradora --> act_encerrar_cancelada
+    act_encerrar_cancelada --> act_notif_cancelamento
+    act_notif_cancelamento --> node_fim_cancelada
+
+    act_avaliar_contra_compradora --> |"[aceitaContraproposta == true]"| act_decidir_amostra
+    act_analisar_proposta --> |"[decisao == ACEITAR]"| act_decidir_amostra
+
+    %% Avaliação de Amostra Técnica (UC09)
+    act_decidir_amostra --> |"[requerHomologacaoLaboratorial == true]"| act_solicitar_amostra
+    act_solicitar_amostra --> act_notif_amostra
+    act_notif_amostra --> act_despachar_amostra
+    act_despachar_amostra --> act_testar_amostra
+    act_testar_amostra --> act_aceitar_compradora
+
+    act_decidir_amostra --> |"[requerHomologacaoLaboratorial == false]"| act_aceitar_compradora
+
+    %% Aceite das Partes
+    act_aceitar_compradora --> act_aceitar_vendedora
+    act_aceitar_vendedora --> fork_fechamento
+
+    %% EXECUÇÃO CONCORRENTE: FORK -> RAMOS -> JOIN
+    fork_fechamento --> act_reserva_lote
+    fork_fechamento --> act_gerar_termo
+    fork_fechamento --> act_disparar_evento
+
+    act_disparar_evento --> act_notif_fechamento
+
+    act_reserva_lote --> join_fechamento
+    act_gerar_termo --> join_fechamento
+    act_notif_fechamento --> join_fechamento
+
+    join_fechamento --> act_transicao_pronto
+    act_transicao_pronto --> node_fim_pronto
+
+    %% -------------------------------------------------------------------------
+    %% ESTILIZAÇÃO VISUAL DOS ELEMENTOS
+    %% -------------------------------------------------------------------------
+    classDef startEnd fill:#2E4053,stroke:#1A252F,stroke-width:2px,color:#FFFFFF,font-weight:bold;
+    classDef decision fill:#FEF9E7,stroke:#B7950B,stroke-width:2px,color:#7D6608,font-weight:bold;
+    classDef forkJoin fill:#1A365D,stroke:#0F233D,stroke-width:3px,color:#FFFFFF,font-weight:bold;
+    classDef actionCore fill:#EBF5FB,stroke:#2980B9,stroke-width:1.5px,color:#1B4F72;
+    classDef actionParty fill:#EAFAF1,stroke:#27AE60,stroke-width:1.5px,color:#145A32;
+    classDef actionNotif fill:#F4ECF7,stroke:#8E44AD,stroke-width:1.5px,color:#512E5F;
+
+    class node_start,node_fim_pronto,node_fim_cancelada startEnd;
+    class act_validar_estoque,act_analisar_proposta,act_avaliar_contra_compradora,act_decidir_amostra decision;
+    class fork_fechamento,join_fechamento forkJoin;
+    class act_criar_negociacao,act_rejeitar_proposta_sem_saldo,act_atualizar_contraproposta,act_reserva_lote,act_gerar_termo,act_disparar_evento,act_transicao_pronto,act_encerrar_cancelada actionCore;
+    class act_manifestar,act_proposta,act_solicitar_amostra,act_testar_amostra,act_aceitar_compradora,act_rejeitar_compradora,act_contrapropor_vendedora,act_rejeitar_vendedora,act_despachar_amostra,act_aceitar_vendedora actionParty;
+    class act_notif_abertura,act_notif_contra,act_notif_amostra,act_notif_fechamento,act_notif_cancelamento actionNotif;
