@@ -30,8 +30,6 @@ A negociação de resíduos e sobras fabris não pode ser modelada como um e-com
 
 ## 2. Estrutura de Governança dos Artefatos (Tree as-Code)
 
-A entrega individual foi estruturada estritamente de acordo com as especificações exigidas na Folha de Instruções:
-
 ```text
 aps3-vitor-silva/
 ├── docs/
